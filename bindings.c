@@ -136,7 +136,7 @@ static void insert_node(struct load_node **n,int locate)
         f->pre=&((*n)->next);
     (*n)->next=f;
 }
-static int iterate_node(char *containerID,int locate) //0没有匹配到 1匹配到
+static int iterate_node(char *containerID,int locate) //0 not match；1 match
 {
     struct load_node *f=NULL;
     int i=0;
@@ -149,7 +149,7 @@ static int iterate_node(char *containerID,int locate) //0没有匹配到 1匹配
     else
         return 0;
 }
-static struct load_node* locate_node(char *containerID,int locate) //0 not match；1 match
+static struct load_node* locate_node(char *containerID,int locate) 
 {
     struct load_node *f=NULL;
     int i=0;
