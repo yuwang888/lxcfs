@@ -840,7 +840,7 @@ static int set_pidfile(char *pidfile)
 
 	return fd;
 }
-
+//extern int load_daemon(void);
 int main(int argc, char *argv[])
 {
 	int ret = EXIT_FAILURE;
@@ -848,6 +848,7 @@ int main(int argc, char *argv[])
 	char *pidfile = NULL, *v = NULL;
 	size_t pidfile_len;
 	bool debug = false;
+	
 	/*
 	 * what we pass to fuse_main is:
 	 * argv[0] -s [-f|-d] -o allow_other,directio argv[1] NULL
@@ -902,6 +903,12 @@ int main(int argc, char *argv[])
 	if ((pidfd = set_pidfile(pidfile)) < 0)
 		goto out;
 
+	////////////////
+	int (*load_daemon)(void);
+    load_daemon = (int (*)(void)) dlsym(dlopen_handle, "load_daemon");
+	load_daemon();
+	
+	///////////////
 	if (!fuse_main(nargs, newargv, &lxcfs_ops, NULL))
 		ret = EXIT_SUCCESS;
 
