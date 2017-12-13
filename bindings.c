@@ -84,11 +84,12 @@ struct file_info {
 };
 //////
 
-#define load_size 100
-#define flush_time 5
+#define load_size 100 //the size of hash_table
+#define flush_time 5  //the flush rate
 #define exp1  0.92004441
 #define exp2  0.98347145
 #define exp3  0.99445984
+#define depth_dir 3   //the depth of per cgroup
 
 static int calc_hash(char *name)
 {
@@ -114,6 +115,7 @@ struct load_node
 };
 struct load_head
 {
+  pthread_mutex_t h_lock;
   struct load_node *next;
 };
 static struct load_head *load_hash[load_size];
@@ -124,10 +126,17 @@ void init_load()
     {
         load_hash[i]=(struct load_head*)malloc(sizeof(struct load_head));
         load_hash[i]->next=NULL;
+        if (pthread_mutex_init(&load_hash[i]->h_lock, NULL) != 0)
+        {
+            free(load_hash[i]);
+            lxcfs_error("%s\n", "mutex init error");
+            exit(1);
+        }
     }
 }
 static void insert_node(struct load_node **n,int locate)
 {
+    pthread_mutex_lock(&load_hash[locate]->h_lock);
     struct load_node *f=load_hash[locate]->next;
     load_hash[locate]->next=*n;
     (*n)->pre=&(load_hash[locate]->next);
@@ -135,32 +144,47 @@ static void insert_node(struct load_node **n,int locate)
     if(f)
         f->pre=&((*n)->next);
     (*n)->next=f;
+    pthread_mutex_unlock(&load_hash[locate]->h_lock);
 }
-static int iterate_node(char *containerID,int locate) //0没有匹配到 1匹配到
+static int iterate_node(char *containerID,int locate) //0 means not find, 1 means find
 {
     struct load_node *f=NULL;
     int i=0;
+    pthread_mutex_lock(&load_hash[locate]->h_lock);
     if(load_hash[locate]->next==NULL)
-      return 0;
+      {
+      	pthread_mutex_unlock(&load_hash[locate]->h_lock);
+      	return 0;
+      }
     for(f=load_hash[locate]->next;f&&((i=strcmp(f->containerID,containerID))!=0);)
             f=f->next;
     if(f)
+    {
+        pthread_mutex_unlock(&load_hash[locate]->h_lock);
         return 1;
+    }
     else
+    {
+        pthread_mutex_unlock(&load_hash[locate]->h_lock);
         return 0;
+    }
 }
-static struct load_node* locate_node(char *containerID,int locate) //0 not match；1 match
+static struct load_node* locate_node(char *containerID,int locate) //not return NULL means find;
 {
     struct load_node *f=NULL;
     int i=0;
+    pthread_mutex_lock(&load_hash[locate]->h_lock);
     if(load_hash[locate]->next==NULL)
-      return f;
+     {
+     	pthread_mutex_unlock(&load_hash[locate]->h_lock);
+     	return f;
+     }
     for(f=load_hash[locate]->next;f&&((i=strcmp(f->containerID,containerID))!=0);)
             f=f->next;
-    if(f)
-        return f;
-    else
-        return f;
+       
+    pthread_mutex_unlock(&load_hash[locate]->h_lock);
+    return f;
+        
 }
 static void load_show()
 {
@@ -168,14 +192,19 @@ static void load_show()
   struct load_node *f;
   for(i=0;i<load_size;i++)
   {
+    pthread_mutex_lock(&load_hash[i]->h_lock);
     if(load_hash[i]->next ==NULL)
+    {
+      pthread_mutex_unlock(&load_hash[i]->h_lock);
       continue;
+    }
     for(f=load_hash[i]->next;f;f=f->next)
     {  
       printf("%s\n",f->containerID );
       for(j=0;j<6;j++)
         printf("%0.2f\n",f->load[j] );
     }
+    pthread_mutex_unlock(&load_hash[i]->h_lock);
   }
 }
 static void load_free()
@@ -184,8 +213,14 @@ static void load_free()
   struct load_node *f,*p;
   for(i=0;i<load_size;i++)
   {
+    pthread_mutex_lock(&load_hash[i]->h_lock);
     if(load_hash[i]->next ==NULL)
-      {free(load_hash[i]); continue;}
+      {
+      	pthread_mutex_unlock(&load_hash[i]->h_lock);
+      	pthread_mutex_destroy(&load_hash[i]->h_lock);
+      	free(load_hash[i]); 
+      	continue;
+      }
     for(f=load_hash[i]->next;f;)
     {  
       free(f->containerID);
@@ -194,6 +229,8 @@ static void load_free()
       free(f);
       f=p;
     }
+    pthread_mutex_unlock(&load_hash[i]->h_lock);
+    pthread_mutex_destroy(&load_hash[i]->h_lock);
     free(load_hash[i]);
   }
 }
@@ -1419,7 +1456,7 @@ static void stripnewline(char *x)
 		x[l-1] = '\0';
 }
 
-static char *get_pid_cgroup(pid_t pid, const char *contrl) //return docker/containerID
+static char *get_pid_cgroup(pid_t pid, const char *contrl) //return /docker/containerID
 {
 	int cfd;
 	char fnam[PROCLEN];
@@ -3447,14 +3484,9 @@ static int proc_cpuinfo_read(char *buf, size_t size, off_t offset,
 	cg = get_pid_cgroup(initpid, "cpuset");
 	if (!cg)
 		return read_file("proc/cpuinfo", buf, size, d);
-//
-	printf("cg1:%s\n",cg);
-//
+
 	prune_init_slice(cg);
 
-//
-	printf("cg2:%s\n",cg);
-//
 	cpuset = get_cpuset(cg);
 	if (!cpuset)
 		goto err;
@@ -4234,45 +4266,94 @@ err:
 	return rv;
 }
 ////////////////////////////////////////
-static int calc_load(struct load_node **p,char *name,int R1,int R5,int R15)
+
+
+static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum){
+
+	DIR *dir;
+	struct dirent *file;
+	char *path = (char*)malloc(sizeof(char)*(strlen(dpath)+20));
+	strcpy(path, dpath);
+
+	if((dir = opendir(path)) == NULL){
+			return sum;
+	}
+	else{
+		while(((file = readdir(dir)) != NULL) && depth > 0){
+			if(strncmp(file->d_name, ".", 1) == 0){
+				continue;
+			}
+			else{
+				if(file->d_type==DT_DIR){
+
+					char *path1 = (char*)malloc(sizeof(char)*(strlen(path)+2+sizeof(file->d_name)));
+					strcpy(path1, path);
+					strcat(path1, "/");
+					strcat(path1, file->d_name);
+
+	
+					int pd = depth - 1;
+					sum = calc_pid(pid_buf, path1, pd,sum);
+					free(path1);
+					
+				}
+			
+				
+			}
+		}
+	}
+
+
+	strcat(path, "/cgroup.procs");
+	//printf("path1=%s\n",path);
+	FILE *f  =NULL;
+	size_t linelen = 0;
+	char *line = NULL;
+
+	if(!(f = fopen(path, "r"))){
+		return sum;
+	}
+
+	while(getline(&line, &linelen, f) != -1){
+		//printf("num==%d\n",sum);
+		*pid_buf = (char **)realloc(*pid_buf, sizeof(char *) * (sum+1));
+		*(*pid_buf + sum) = (char *)malloc(sizeof(char) * (strlen(line) + 3));
+		strcpy(*(*pid_buf + sum), line);
+		sum++;
+	}
+
+	fclose(f);
+	free(path);
+
+	return sum;
+}
+
+static int calc_load(struct load_node **p,char *path)
 {
-  char path[200];
+  
+  
+  
   FILE *f = NULL;
+  char **idbuf;
+  char proc_path[50];
+  int i,run_pid=0,total_pid=0,last_pid=0; 
   char *line = NULL;
   size_t linelen = 0;
-  char **idbuf;
-  int i=0;
-  int num=0;
+  idbuf = (char **)malloc(sizeof(char*));
+  int num = calc_pid(&idbuf, path, depth_dir,0);
   DIR *dp; 
-    struct dirent *file;
-    int run_pid=0,total_pid=0,last_pid=0; 
-  sprintf(path,"/sys/fs/cgroup/cpu/docker/%s/cgroup.procs",name);
-  
-  if(!(f=fopen(path,"r")))
-    return 0;
-  
-  idbuf=(char **)malloc(sizeof(char *));
-    if(getline(&line, &linelen, f)==-1)
-      return 0;
-    idbuf[num]=(char *)malloc(sizeof(char )*strlen(line));
-    strcpy(idbuf[num],line);
-    num++;
-    while(getline(&line, &linelen, f) != -1)
-    {
-        idbuf=(char **)realloc(idbuf,sizeof(char *)*(num+1));
-        idbuf[num]=(char *)malloc(sizeof(char )*strlen(line));
-        strcpy(idbuf[num],line);
-      num++;
-    }
-    fclose(f);
+  struct dirent *file;
+
+  if(num==0) return num;
+
   for(i=0;i<num;i++)
   {
     
     idbuf[i][strlen(idbuf[i])-1]='\0';
-    sprintf(path,"/proc/%s/task",idbuf[i]);
-    if(!(dp = opendir(path)))
+    sprintf(proc_path,"/proc/%s/task",idbuf[i]);
+    if(!(dp = opendir(proc_path)))
     {
-      printf("calc error opendir %s!!!\n",path);
+      printf("calc error opendir %s!!!\n",proc_path);
       continue;
     }else
     
@@ -4282,9 +4363,9 @@ static int calc_load(struct load_node **p,char *name,int R1,int R5,int R15)
                 continue;
               total_pid++;
               last_pid=(atof(file->d_name)>last_pid)?atof(file->d_name):last_pid;
-              sprintf(path,"/proc/%s/task/%s/status",idbuf[i],file->d_name);
-             // printf("%s\n",path);
-              if((f=fopen(path,"r"))!=NULL)
+              sprintf(proc_path,"/proc/%s/task/%s/status",idbuf[i],file->d_name);
+             
+              if((f=fopen(proc_path,"r"))!=NULL)
               {
                 //printf("get in\n");
                 if(getline(&line, &linelen, f)!=-1) 
@@ -4298,32 +4379,94 @@ static int calc_load(struct load_node **p,char *name,int R1,int R5,int R15)
               }
       
       }
+      closedir(dp);
     
   }
- if(R1==1)
-   {(*p)->load[0] = (*p)->load[0]*exp1+run_pid*(1-exp1); 
+
+   (*p)->load[0] = (*p)->load[0]*exp1+run_pid*(1-exp1); 
     //printf("%.2f\n",(*p)->load[0] );
-   }
-  if(R5==1)
-   {(*p)->load[1] = (*p)->load[1]*exp2+run_pid*(1-exp2); 
+   
+
+   (*p)->load[1] = (*p)->load[1]*exp2+run_pid*(1-exp2); 
     //printf("%.2f\n",(*p)->load[1] );
-   } 
-  if(R15==1)
-   {(*p)->load[2] = (*p)->load[2]*exp3+run_pid*(1-exp3); 
+    
+
+   (*p)->load[2] = (*p)->load[2]*exp3+run_pid*(1-exp3); 
     //printf("%.2f\n",(*p)->load[2] );
-   }
+   
 
   (*p)->load[3]=run_pid;
   (*p)->load[4]=total_pid;
   (*p)->load[5]=last_pid;  
   
-  closedir(dp);
+  
   for(;i>0;i--)
     free(idbuf[i-1]);
     free(idbuf);
     free(line);
-  return 1;
+  return num;
 
+}
+
+
+void* load_begin(void* arg)
+{
+
+
+   char *path=NULL;
+   
+   int i,j;
+   struct load_node *f,*g;
+while(1)
+{
+
+
+   for(i=0;i<load_size;i++)
+   {
+     pthread_mutex_lock(&load_hash[i]->h_lock);
+     if(load_hash[i]->next ==NULL)
+     {
+       pthread_mutex_unlock(&load_hash[i]->h_lock);
+       continue;
+     }
+     for(f=load_hash[i]->next;f;)
+     {  
+       //printf("%s\n",f->containerID );
+       
+       path=(char*)malloc(strlen("/sys/fs/cgroup/cpu")+strlen(f->containerID)+1);
+       sprintf(path,"%s%s","/sys/fs/cgroup/cpu",f->containerID);
+       j=calc_load(&f,path);
+      // printf("----------i:%d------------j:%d------------------------------\n",i,j );
+       if(j==0)
+       {
+      	 free(path);
+      	 if(f->next==NULL)
+      	 {
+      	 	*(f->pre)=NULL;
+      	 }else{
+      	 	*(f->pre)=f->next;
+      	     f->next->pre=f->pre;
+      	 }
+      	 g=f->next;
+      	 printf("pthread node %s cancle\n",f->containerID);
+      	 free(f->containerID);
+      	 free(f);
+      	 f=g;
+      	 
+       
+       }
+       else
+       	{f=f->next;}
+      
+     }
+     pthread_mutex_unlock(&load_hash[i]->h_lock);
+   }
+
+     // load_show();
+      sleep(flush_time);
+}
+   
+ 
 }
  
 static int proc_loadavg_read(char *buf, size_t size, off_t offset,
@@ -4358,11 +4501,36 @@ static int proc_loadavg_read(char *buf, size_t size, off_t offset,
 		return read_file("loadavg", buf, size, d);
 
 	prune_init_slice(cg);
-	cg=cg+8;
+	//cg=cg+8;
+	printf("cg\n");
 	hash=calc_hash(cg);
 	n=locate_node(cg,hash);
+	pthread_mutex_lock(&load_hash[hash]->h_lock);
+
+	if(n==NULL)//first time
+	{
 	
-	total_len = snprintf(d->buf, d->buflen, "%.2f    %.2f    %.2f  %d/%d   %d\n",n->load[0],n->load[1],n->load[2],(int)(n->load[3]),(int)(n->load[4]),(int)(n->load[5]));
+		pthread_mutex_unlock(&load_hash[hash]->h_lock);
+		
+		n=(struct load_node*)malloc(sizeof(struct load_node));
+		n->containerID=(char*)malloc(strlen(cg)+1);
+        strcpy(n->containerID,cg);
+       // memset(n->load,0,sizeof(float)*6);
+        n->load[0]=0;
+        n->load[1]=0;
+        n->load[2]=0;
+        n->load[3]=0;
+        n->load[4]=1;
+        n->load[5]=initpid;
+
+        insert_node(&n,hash);
+        pthread_mutex_lock(&load_hash[hash]->h_lock);
+
+	}
+
+	
+	total_len = snprintf(d->buf, d->buflen, "%.2f %.2f %.2f %d/%d %d\n",n->load[0],n->load[1],n->load[2],(int)(n->load[3]),(int)(n->load[4]),(int)(n->load[5]));
+	pthread_mutex_unlock(&load_hash[hash]->h_lock);
 	if (total_len < 0 || total_len >=  d->buflen){
 		lxcfs_error("%s\n", "failed to write to cache");
 		return 0;
@@ -4374,72 +4542,25 @@ static int proc_loadavg_read(char *buf, size_t size, off_t offset,
 	if (total_len > size) total_len = size;
 
 	memcpy(buf, d->buf, total_len);
+
 	return total_len;
-
+	
+	
 }
-void* load_begin(void* arg)
-{
-   DIR *dp;
-   struct dirent *file;
-   char *path=NULL;
-   int hash;
-   //int x=1,y=0,z=0,count=0;
-   struct load_node *p,*p1;
-   init_load();
-   path=(char*)malloc(strlen("/sys/fs/cgroup/cpu/docker")+1);
-   sprintf(path,"/sys/fs/cgroup/cpu/docker");
 
-   while(1)
-   {
-
-   if(!(dp = opendir(path)))
-    {
-      printf("In load_begin : error opendir %s!!!/n",path);
-      sleep(flush_time);
-      continue;
-    }else
-    
-      while((file = readdir(dp)) != NULL)
-      {
-        if(strncmp(file->d_name, ".", 1) == 0)
-                continue;
-        if(file->d_type==DT_DIR)
-        {
-          hash=calc_hash(file->d_name);
-          if((p1=locate_node(file->d_name,hash))==NULL) //not match
-          {
-            p=(struct load_node*)malloc(sizeof(struct load_node));
-            p->containerID=(char*)malloc(strlen(file->d_name)+1);
-            strcpy(p->containerID,file->d_name);
-            memset(p->load,0,sizeof(float)*6);
-            insert_node(&p,hash);
-            calc_load(&p,file->d_name,1,1,1);
-          }else{                                  //match
-            calc_load(&p1,file->d_name,1,1,1);
-          }
-        }
-      
-      }
-     // load_show();
-     // printf("-------------------------------\n");
-      sleep(flush_time);
-      
-    }
-   free(path);
-   load_free();
-   closedir(dp);
-   return 0;
-}
 int load_daemon(void)
 {   
+    init_load();
     int ret;  
-    pthread_t pid;
+   	pthread_t pid;
+   		
     ret = pthread_create(&pid,NULL,load_begin,NULL);  
     if(ret != 0)  
     {     
-        printf("Create pthread error!\n");  
-        exit(1);  
-    }    
+       	printf("Create pthread error!\n");  
+       	exit(1);  
+    } 
+    return 0;
   
 }
 ////////////////////////////////////////
