@@ -36,6 +36,9 @@
 #include <sys/sysinfo.h>
 #include <sys/vfs.h>
 
+#include <math.h>
+#include <pthread.h>
+
 #include "bindings.h"
 #include "config.h" // for VERSION
 
@@ -66,6 +69,7 @@ enum {
 	LXC_TYPE_PROC_STAT,
 	LXC_TYPE_PROC_DISKSTATS,
 	LXC_TYPE_PROC_SWAPS,
+	LXC_TYPE_PROC_LOADAVG,
 };
 
 struct file_info {
@@ -78,6 +82,159 @@ struct file_info {
 	int size; //actual data size
 	int cached;
 };
+//////
+
+#define load_size 100 //the size of hash_table
+#define flush_time 5  //the flush rate
+#define exp1  0.92004441
+#define exp2  0.98347145
+#define exp3  0.99445984
+#define depth_dir 3   //the depth of per cgroup
+
+static int calc_hash(char *name)
+{
+    unsigned int hash=0;
+    unsigned int x=0;
+    while(*name)
+    {
+        hash=(hash<<4)+*name++;
+        if((x=hash & 0xf0000000)!=0)
+        {
+            hash^=(x>>24);
+            hash&=~x;
+        }
+    }
+    return ((hash & 0x7fffffff)% load_size);
+}
+struct load_node
+{
+  char *containerID;
+  float load[6];
+  struct  load_node *next;
+  struct  load_node **pre;
+};
+struct load_head
+{
+  pthread_mutex_t h_lock;
+  struct load_node *next;
+};
+static struct load_head *load_hash[load_size];
+void init_load()
+{
+    int i;
+    for(i=0;i<load_size;i++)
+    {
+        load_hash[i]=(struct load_head*)malloc(sizeof(struct load_head));
+        load_hash[i]->next=NULL;
+        if (pthread_mutex_init(&load_hash[i]->h_lock, NULL) != 0)
+        {
+            free(load_hash[i]);
+            lxcfs_error("%s\n", "mutex init error");
+            exit(1);
+        }
+    }
+}
+static void insert_node(struct load_node **n,int locate)
+{
+    pthread_mutex_lock(&load_hash[locate]->h_lock);
+    struct load_node *f=load_hash[locate]->next;
+    load_hash[locate]->next=*n;
+    (*n)->pre=&(load_hash[locate]->next);
+
+    if(f)
+        f->pre=&((*n)->next);
+    (*n)->next=f;
+    pthread_mutex_unlock(&load_hash[locate]->h_lock);
+}
+static int iterate_node(char *containerID,int locate) //0 means not find, 1 means find
+{
+    struct load_node *f=NULL;
+    int i=0;
+    pthread_mutex_lock(&load_hash[locate]->h_lock);
+    if(load_hash[locate]->next==NULL)
+      {
+      	pthread_mutex_unlock(&load_hash[locate]->h_lock);
+      	return 0;
+      }
+    for(f=load_hash[locate]->next;f&&((i=strcmp(f->containerID,containerID))!=0);)
+            f=f->next;
+    if(f)
+    {
+        pthread_mutex_unlock(&load_hash[locate]->h_lock);
+        return 1;
+    }
+    else
+    {
+        pthread_mutex_unlock(&load_hash[locate]->h_lock);
+        return 0;
+    }
+}
+static struct load_node* locate_node(char *containerID,int locate) //not return NULL means find;
+{
+    struct load_node *f=NULL;
+    int i=0;
+    pthread_mutex_lock(&load_hash[locate]->h_lock);
+    if(load_hash[locate]->next==NULL)
+     {
+     	pthread_mutex_unlock(&load_hash[locate]->h_lock);
+     	return f;
+     }
+    for(f=load_hash[locate]->next;f&&((i=strcmp(f->containerID,containerID))!=0);)
+            f=f->next;
+       
+    pthread_mutex_unlock(&load_hash[locate]->h_lock);
+    return f;
+        
+}
+static void load_show()
+{
+  int i,j;
+  struct load_node *f;
+  for(i=0;i<load_size;i++)
+  {
+    pthread_mutex_lock(&load_hash[i]->h_lock);
+    if(load_hash[i]->next ==NULL)
+    {
+      pthread_mutex_unlock(&load_hash[i]->h_lock);
+      continue;
+    }
+    for(f=load_hash[i]->next;f;f=f->next)
+    {  
+      printf("%s\n",f->containerID );
+      for(j=0;j<6;j++)
+        printf("%0.2f\n",f->load[j] );
+    }
+    pthread_mutex_unlock(&load_hash[i]->h_lock);
+  }
+}
+static void load_free()
+{
+  int i;
+  struct load_node *f,*p;
+  for(i=0;i<load_size;i++)
+  {
+    pthread_mutex_lock(&load_hash[i]->h_lock);
+    if(load_hash[i]->next ==NULL)
+      {
+      	pthread_mutex_unlock(&load_hash[i]->h_lock);
+      	pthread_mutex_destroy(&load_hash[i]->h_lock);
+      	free(load_hash[i]); 
+      	continue;
+      }
+    for(f=load_hash[i]->next;f;)
+    {  
+      free(f->containerID);
+      p=f->next;
+
+      free(f);
+      f=p;
+    }
+    pthread_mutex_unlock(&load_hash[i]->h_lock);
+    pthread_mutex_destroy(&load_hash[i]->h_lock);
+    free(load_hash[i]);
+  }
+}
+//////
 
 /* Reserve buffer size to account for file size changes. */
 #define BUF_RESERVE_SIZE 512
@@ -1070,7 +1227,7 @@ out:
 	return ret;
 }
 
-static pid_t lookup_initpid_in_store(pid_t qpid)
+static pid_t lookup_initpid_in_store(pid_t qpid)  //the pid of contianer in host
 {
 	pid_t answer = 0;
 	struct stat sb;
@@ -1299,7 +1456,7 @@ static void stripnewline(char *x)
 		x[l-1] = '\0';
 }
 
-static char *get_pid_cgroup(pid_t pid, const char *contrl)
+static char *get_pid_cgroup(pid_t pid, const char *contrl) //return /docker/containerID
 {
 	int cfd;
 	char fnam[PROCLEN];
@@ -3112,7 +3269,7 @@ static int proc_meminfo_read(char *buf, size_t size, off_t offset,
 		return total_len;
 	}
 
-	pid_t initpid = lookup_initpid_in_store(fc->pid);
+	pid_t initpid = lookup_initpid_in_store(fc->pid); 
 	if (initpid <= 0)
 		initpid = fc->pid;
 	cg = get_pid_cgroup(initpid, "memory");
@@ -3327,6 +3484,7 @@ static int proc_cpuinfo_read(char *buf, size_t size, off_t offset,
 	cg = get_pid_cgroup(initpid, "cpuset");
 	if (!cg)
 		return read_file("proc/cpuinfo", buf, size, d);
+
 	prune_init_slice(cg);
 
 	cpuset = get_cpuset(cg);
@@ -4107,7 +4265,305 @@ err:
 	free(memswusage_str);
 	return rv;
 }
+////////////////////////////////////////
 
+
+static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum){
+
+	DIR *dir;
+	struct dirent *file;
+	char *path = (char*)malloc(sizeof(char)*(strlen(dpath)+20));
+	strcpy(path, dpath);
+
+	if((dir = opendir(path)) == NULL){
+			return sum;
+	}
+	else{
+		while(((file = readdir(dir)) != NULL) && depth > 0){
+			if(strncmp(file->d_name, ".", 1) == 0){
+				continue;
+			}
+			else{
+				if(file->d_type==DT_DIR){
+
+					char *path1 = (char*)malloc(sizeof(char)*(strlen(path)+2+sizeof(file->d_name)));
+					strcpy(path1, path);
+					strcat(path1, "/");
+					strcat(path1, file->d_name);
+
+	
+					int pd = depth - 1;
+					sum = calc_pid(pid_buf, path1, pd,sum);
+					free(path1);
+					
+				}
+			
+				
+			}
+		}
+	}
+
+
+	strcat(path, "/cgroup.procs");
+	//printf("path1=%s\n",path);
+	FILE *f  =NULL;
+	size_t linelen = 0;
+	char *line = NULL;
+
+	if(!(f = fopen(path, "r"))){
+		return sum;
+	}
+
+	while(getline(&line, &linelen, f) != -1){
+		//printf("num==%d\n",sum);
+		*pid_buf = (char **)realloc(*pid_buf, sizeof(char *) * (sum+1));
+		*(*pid_buf + sum) = (char *)malloc(sizeof(char) * (strlen(line) + 3));
+		strcpy(*(*pid_buf + sum), line);
+		sum++;
+	}
+
+	fclose(f);
+	free(path);
+
+	return sum;
+}
+
+static int calc_load(struct load_node **p,char *path)
+{
+  
+  
+  
+  FILE *f = NULL;
+  char **idbuf;
+  char proc_path[50];
+  int i,run_pid=0,total_pid=0,last_pid=0; 
+  char *line = NULL;
+  size_t linelen = 0;
+  idbuf = (char **)malloc(sizeof(char*));
+  int num = calc_pid(&idbuf, path, depth_dir,0);
+  DIR *dp; 
+  struct dirent *file;
+
+  if(num==0) return num;
+
+  for(i=0;i<num;i++)
+  {
+    
+    idbuf[i][strlen(idbuf[i])-1]='\0';
+    sprintf(proc_path,"/proc/%s/task",idbuf[i]);
+    if(!(dp = opendir(proc_path)))
+    {
+      printf("calc error opendir %s!!!\n",proc_path);
+      continue;
+    }else
+    
+      while((file = readdir(dp)) != NULL)
+      {
+        if(strncmp(file->d_name, ".", 1) == 0)
+                continue;
+              total_pid++;
+              last_pid=(atof(file->d_name)>last_pid)?atof(file->d_name):last_pid;
+              sprintf(proc_path,"/proc/%s/task/%s/status",idbuf[i],file->d_name);
+             
+              if((f=fopen(proc_path,"r"))!=NULL)
+              {
+                //printf("get in\n");
+                if(getline(&line, &linelen, f)!=-1) 
+                  if(getline(&line, &linelen, f)!=-1)
+                   if(getline(&line, &linelen, f)!=-1)
+                   {
+                      if((line[7]=='R')||(line[7]=='D'))
+                    run_pid++;
+                    }
+                fclose(f);
+              }
+      
+      }
+      closedir(dp);
+    
+  }
+
+   (*p)->load[0] = (*p)->load[0]*exp1+run_pid*(1-exp1); 
+    //printf("%.2f\n",(*p)->load[0] );
+   
+
+   (*p)->load[1] = (*p)->load[1]*exp2+run_pid*(1-exp2); 
+    //printf("%.2f\n",(*p)->load[1] );
+    
+
+   (*p)->load[2] = (*p)->load[2]*exp3+run_pid*(1-exp3); 
+    //printf("%.2f\n",(*p)->load[2] );
+   
+
+  (*p)->load[3]=run_pid;
+  (*p)->load[4]=total_pid;
+  (*p)->load[5]=last_pid;  
+  
+  
+  for(;i>0;i--)
+    free(idbuf[i-1]);
+    free(idbuf);
+    free(line);
+  return num;
+
+}
+
+
+void* load_begin(void* arg)
+{
+
+
+   char *path=NULL;
+   
+   int i,j;
+   struct load_node *f,*g;
+while(1)
+{
+
+
+   for(i=0;i<load_size;i++)
+   {
+     pthread_mutex_lock(&load_hash[i]->h_lock);
+     if(load_hash[i]->next ==NULL)
+     {
+       pthread_mutex_unlock(&load_hash[i]->h_lock);
+       continue;
+     }
+     for(f=load_hash[i]->next;f;)
+     {  
+       //printf("%s\n",f->containerID );
+       
+       path=(char*)malloc(strlen("/sys/fs/cgroup/cpu")+strlen(f->containerID)+1);
+       sprintf(path,"%s%s","/sys/fs/cgroup/cpu",f->containerID);
+       j=calc_load(&f,path);
+      // printf("----------i:%d------------j:%d------------------------------\n",i,j );
+       if(j==0)
+       {
+      	 free(path);
+      	 if(f->next==NULL)
+      	 {
+      	 	*(f->pre)=NULL;
+      	 }else{
+      	 	*(f->pre)=f->next;
+      	     f->next->pre=f->pre;
+      	 }
+      	 g=f->next;
+      	 printf("pthread node %s cancle\n",f->containerID);
+      	 free(f->containerID);
+      	 free(f);
+      	 f=g;
+      	 
+       
+       }
+       else
+       	{f=f->next;}
+      
+     }
+     pthread_mutex_unlock(&load_hash[i]->h_lock);
+   }
+
+     // load_show();
+      sleep(flush_time);
+}
+   
+ 
+}
+ 
+static int proc_loadavg_read(char *buf, size_t size, off_t offset,
+		struct fuse_file_info *fi)
+{
+	struct fuse_context *fc = fuse_get_context();
+	struct file_info *d = (struct file_info *)fi->fh;
+	char *cg;
+	size_t total_len = 0;
+	
+	char *cache = d->buf;
+
+    struct load_node *n;
+    int hash;
+
+	if (offset){
+		if (offset > d->size)
+			return -EINVAL;
+		if (!d->cached)
+			return 0;
+		int left = d->size - offset;
+		total_len = left > size ? size: left;
+		memcpy(buf, cache + offset, total_len);
+		return total_len;
+	}
+
+	pid_t initpid = lookup_initpid_in_store(fc->pid);
+	if (initpid <= 0)
+		initpid = fc->pid;
+	cg = get_pid_cgroup(initpid, "cpu");
+	if (!cg)
+		return read_file("loadavg", buf, size, d);
+
+	prune_init_slice(cg);
+	//cg=cg+8;
+	printf("cg\n");
+	hash=calc_hash(cg);
+	n=locate_node(cg,hash);
+	pthread_mutex_lock(&load_hash[hash]->h_lock);
+
+	if(n==NULL)//first time
+	{
+	
+		pthread_mutex_unlock(&load_hash[hash]->h_lock);
+		
+		n=(struct load_node*)malloc(sizeof(struct load_node));
+		n->containerID=(char*)malloc(strlen(cg)+1);
+        strcpy(n->containerID,cg);
+       // memset(n->load,0,sizeof(float)*6);
+        n->load[0]=0;
+        n->load[1]=0;
+        n->load[2]=0;
+        n->load[3]=0;
+        n->load[4]=1;
+        n->load[5]=initpid;
+
+        insert_node(&n,hash);
+        pthread_mutex_lock(&load_hash[hash]->h_lock);
+
+	}
+
+	
+	total_len = snprintf(d->buf, d->buflen, "%.2f %.2f %.2f %d/%d %d\n",n->load[0],n->load[1],n->load[2],(int)(n->load[3]),(int)(n->load[4]),(int)(n->load[5]));
+	pthread_mutex_unlock(&load_hash[hash]->h_lock);
+	if (total_len < 0 || total_len >=  d->buflen){
+		lxcfs_error("%s\n", "failed to write to cache");
+		return 0;
+	}
+
+	d->size = (int)total_len;
+	d->cached = 1;
+
+	if (total_len > size) total_len = size;
+
+	memcpy(buf, d->buf, total_len);
+
+	return total_len;
+	
+	
+}
+
+int load_daemon(void)
+{   
+    init_load();
+    int ret;  
+   	pthread_t pid;
+   		
+    ret = pthread_create(&pid,NULL,load_begin,NULL);  
+    if(ret != 0)  
+    {     
+       	printf("Create pthread error!\n");  
+       	exit(1);  
+    } 
+    return 0;
+  
+}
+////////////////////////////////////////
 static off_t get_procfile_size(const char *which)
 {
 	FILE *f = fopen(which, "r");
@@ -4144,7 +4600,8 @@ int proc_getattr(const char *path, struct stat *sb)
 			strcmp(path, "/proc/uptime") == 0 ||
 			strcmp(path, "/proc/stat") == 0 ||
 			strcmp(path, "/proc/diskstats") == 0 ||
-			strcmp(path, "/proc/swaps") == 0) {
+			strcmp(path, "/proc/swaps") == 0 ||
+			strcmp(path, "/proc/loadavg") == 0) {                        ////
 		sb->st_size = 0;
 		sb->st_mode = S_IFREG | 00444;
 		sb->st_nlink = 1;
@@ -4164,7 +4621,8 @@ int proc_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offs
 	    filler(buf, "stat", NULL, 0) != 0 ||
 	    filler(buf, "uptime", NULL, 0) != 0 ||
 	    filler(buf, "diskstats", NULL, 0) != 0 ||
-	    filler(buf, "swaps", NULL, 0) != 0)
+	    filler(buf, "swaps", NULL, 0) != 0   ||
+	    filler(buf, "loadavg", NULL, 0) != 0 )   ////
 		return -EINVAL;
 	return 0;
 }
@@ -4186,6 +4644,8 @@ int proc_open(const char *path, struct fuse_file_info *fi)
 		type = LXC_TYPE_PROC_DISKSTATS;
 	else if (strcmp(path, "/proc/swaps") == 0)
 		type = LXC_TYPE_PROC_SWAPS;
+	else if(strcmp(path,"/proc/loadavg") == 0)     ////
+		type = LXC_TYPE_PROC_LOADAVG;
 	if (type == -1)
 		return -ENOENT;
 
@@ -4243,6 +4703,8 @@ int proc_read(const char *path, char *buf, size_t size, off_t offset,
 		return proc_diskstats_read(buf, size, offset, fi);
 	case LXC_TYPE_PROC_SWAPS:
 		return proc_swaps_read(buf, size, offset, fi);
+	case LXC_TYPE_PROC_LOADAVG:                                        ////
+		return proc_loadavg_read(buf, size, offset, fi);	
 	default:
 		return -EINVAL;
 	}
