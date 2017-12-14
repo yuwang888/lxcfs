@@ -108,8 +108,9 @@ static int calc_hash(char *name)
 }
 struct load_node
 {
-  char *containerID;
+  char *containerID;  //cg
   float load[6];
+  int cfd;
   struct  load_node *next;
   struct  load_node **pre;
 };
@@ -4267,15 +4268,19 @@ err:
 }
 ////////////////////////////////////////
 
-
-static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum){
+static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum,int cfd){
 
 	DIR *dir;
+	int fd;
 	struct dirent *file;
 	char *path = (char*)malloc(sizeof(char)*(strlen(dpath)+20));
 	strcpy(path, dpath);
+	
+	fd = openat(cfd, path, O_RDONLY);
+	if (fd < 0)
+		return sum;
 
-	if((dir = opendir(path)) == NULL){
+	if((dir = fdopendir(fd)) == NULL){
 			return sum;
 	}
 	else{
@@ -4293,7 +4298,7 @@ static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum){
 
 	
 					int pd = depth - 1;
-					sum = calc_pid(pid_buf, path1, pd,sum);
+					sum = calc_pid(pid_buf, path1, pd,sum,cfd);
 					free(path1);
 					
 				}
@@ -4301,16 +4306,20 @@ static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum){
 				
 			}
 		}
+		closedir(dir);
 	}
 
-
+	close(fd);
 	strcat(path, "/cgroup.procs");
-	//printf("path1=%s\n",path);
 	FILE *f  =NULL;
 	size_t linelen = 0;
 	char *line = NULL;
 
-	if(!(f = fopen(path, "r"))){
+	fd = openat(cfd, path, O_RDONLY);
+	if (fd < 0)
+		return sum;
+
+	if(!(f = fdopen(fd, "r"))){
 		return sum;
 	}
 
@@ -4340,7 +4349,7 @@ static int calc_load(struct load_node **p,char *path)
   char *line = NULL;
   size_t linelen = 0;
   idbuf = (char **)malloc(sizeof(char*));
-  int num = calc_pid(&idbuf, path, depth_dir,0);
+  int num = calc_pid(&idbuf, path, depth_dir,0,(*p)->cfd);
   DIR *dp; 
   struct dirent *file;
 
@@ -4425,9 +4434,8 @@ while(1)
      for(f=load_hash[i]->next;f;)
      {  
        //printf("%s\n",f->containerID );
-       
-       path=(char*)malloc(strlen("/sys/fs/cgroup/cpu")+strlen(f->containerID)+1);
-       sprintf(path,"%s%s","/sys/fs/cgroup/cpu",f->containerID);
+       path=(char*)malloc(strlen(f->containerID)+2);
+       sprintf(path,"%s%s",*(f->containerID) == '/' ? "." : "",f->containerID);
        j=calc_load(&f,path);
        //printf("----------i:%d------------j:%d------------------------------\n",i,j );
        if(j==0)
@@ -4444,12 +4452,10 @@ while(1)
       	 printf("pthread node %s cancel\n",f->containerID);
       	 free(f->containerID);
       	 free(f);
-      	 f=g;
-      	 
-       
+      	 f=g;       
        }
        else
-       	{f=f->next;}
+       	f=f->next;
       
      }
      pthread_mutex_unlock(&load_hash[i]->h_lock);
@@ -4468,7 +4474,6 @@ void* load_begin1(void* arg)
    char *path=NULL;
    
    int i,j;
-  
    struct load_node *f,*g;
 while(1)
 {
@@ -4485,11 +4490,10 @@ while(1)
      for(f=load_hash[i]->next;f;)
      {  
        //printf("%s\n",f->containerID );
-       
-       path=(char*)malloc(strlen("/sys/fs/cgroup/cpu")+strlen(f->containerID)+1);
-       sprintf(path,"%s%s","/sys/fs/cgroup/cpu",f->containerID);
+       path=(char*)malloc(strlen(f->containerID)+2);
+       sprintf(path,"%s%s",*(f->containerID) == '/' ? "." : "",f->containerID);
        j=calc_load(&f,path);
-     // printf("----------i:%d------------j:%d------------------------------\n",i,j );
+       //printf("----------i:%d------------j:%d------------------------------\n",i,j );
        if(j==0)
        {
       	 free(path);
@@ -4504,12 +4508,10 @@ while(1)
       	 printf("pthread node %s cancel\n",f->containerID);
       	 free(f->containerID);
       	 free(f);
-      	 f=g;
-      	 
-       
+      	 f=g;       
        }
        else
-       	{f=f->next;}
+       	f=f->next;
       
      }
      pthread_mutex_unlock(&load_hash[i]->h_lock);
@@ -4534,6 +4536,7 @@ static int proc_loadavg_read(char *buf, size_t size, off_t offset,
 
     struct load_node *n;
     int hash;
+    int cfd;
 
 	if (offset){
 		if (offset > d->size)
@@ -4563,6 +4566,9 @@ static int proc_loadavg_read(char *buf, size_t size, off_t offset,
 	if(n==NULL)//first time
 	{
 	
+		if (!find_mounted_controller("cpu", &cfd))
+			return 0;
+
 		pthread_mutex_unlock(&load_hash[hash]->h_lock);
 		
 		n=(struct load_node*)malloc(sizeof(struct load_node));
@@ -4575,6 +4581,7 @@ static int proc_loadavg_read(char *buf, size_t size, off_t offset,
         n->load[3]=0;
         n->load[4]=1;
         n->load[5]=initpid;
+        n->cfd=cfd;       
 
         insert_node(&n,hash);
         pthread_mutex_lock(&load_hash[hash]->h_lock);
