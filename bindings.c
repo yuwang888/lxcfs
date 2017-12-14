@@ -4384,16 +4384,8 @@ static int calc_load(struct load_node **p,char *path)
   }
 
    (*p)->load[0] = (*p)->load[0]*exp1+run_pid*(1-exp1); 
-    //printf("%.2f\n",(*p)->load[0] );
-   
-
    (*p)->load[1] = (*p)->load[1]*exp2+run_pid*(1-exp2); 
-    //printf("%.2f\n",(*p)->load[1] );
-    
-
-   (*p)->load[2] = (*p)->load[2]*exp3+run_pid*(1-exp3); 
-    //printf("%.2f\n",(*p)->load[2] );
-   
+   (*p)->load[2] = (*p)->load[2]*exp3+run_pid*(1-exp3);    
 
   (*p)->load[3]=run_pid;
   (*p)->load[4]=total_pid;
@@ -4415,13 +4407,14 @@ void* load_begin(void* arg)
 
    char *path=NULL;
    
-   int i,j;
+   int i,j,k;
+   k=load_size/2;
    struct load_node *f,*g;
 while(1)
 {
 
 
-   for(i=0;i<load_size;i++)
+   for(i=0;i<k;i++)
    {
      pthread_mutex_lock(&load_hash[i]->h_lock);
      if(load_hash[i]->next ==NULL)
@@ -4436,7 +4429,7 @@ while(1)
        path=(char*)malloc(strlen("/sys/fs/cgroup/cpu")+strlen(f->containerID)+1);
        sprintf(path,"%s%s","/sys/fs/cgroup/cpu",f->containerID);
        j=calc_load(&f,path);
-      // printf("----------i:%d------------j:%d------------------------------\n",i,j );
+       //printf("----------i:%d------------j:%d------------------------------\n",i,j );
        if(j==0)
        {
       	 free(path);
@@ -4448,7 +4441,67 @@ while(1)
       	     f->next->pre=f->pre;
       	 }
       	 g=f->next;
-      	 printf("pthread node %s cancle\n",f->containerID);
+      	 printf("pthread node %s cancel\n",f->containerID);
+      	 free(f->containerID);
+      	 free(f);
+      	 f=g;
+      	 
+       
+       }
+       else
+       	{f=f->next;}
+      
+     }
+     pthread_mutex_unlock(&load_hash[i]->h_lock);
+   }
+
+     // load_show();
+      sleep(flush_time);
+}
+   
+ 
+}
+void* load_begin1(void* arg)
+{
+
+
+   char *path=NULL;
+   
+   int i,j;
+  
+   struct load_node *f,*g;
+while(1)
+{
+
+
+   for(i=load_size/2;i<load_size;i++)
+   {
+     pthread_mutex_lock(&load_hash[i]->h_lock);
+     if(load_hash[i]->next ==NULL)
+     {
+       pthread_mutex_unlock(&load_hash[i]->h_lock);
+       continue;
+     }
+     for(f=load_hash[i]->next;f;)
+     {  
+       //printf("%s\n",f->containerID );
+       
+       path=(char*)malloc(strlen("/sys/fs/cgroup/cpu")+strlen(f->containerID)+1);
+       sprintf(path,"%s%s","/sys/fs/cgroup/cpu",f->containerID);
+       j=calc_load(&f,path);
+     // printf("----------i:%d------------j:%d------------------------------\n",i,j );
+       if(j==0)
+       {
+      	 free(path);
+      	 if(f->next==NULL)
+      	 {
+      	 	*(f->pre)=NULL;
+      	 }else{
+      	 	*(f->pre)=f->next;
+      	     f->next->pre=f->pre;
+      	 }
+      	 g=f->next;
+      	 printf("pthread node %s cancel\n",f->containerID);
       	 free(f->containerID);
       	 free(f);
       	 f=g;
@@ -4558,6 +4611,12 @@ int load_daemon(void)
     if(ret != 0)  
     {     
        	printf("Create pthread error!\n");  
+       	exit(1);  
+    } 
+    ret = pthread_create(&pid,NULL,load_begin1,NULL);  
+    if(ret != 0)  
+    {     
+       	printf("Create pthread1 error!\n");  
        	exit(1);  
     } 
     return 0;
