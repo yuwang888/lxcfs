@@ -4455,7 +4455,10 @@ while(1)
       	 f=g;       
        }
        else
-       	f=f->next;
+       {	
+	  free(path);
+	  f=f->next;
+       }
       
      }
      pthread_mutex_unlock(&load_hash[i]->h_lock);
@@ -4511,7 +4514,10 @@ while(1)
       	 f=g;       
        }
        else
-       	f=f->next;
+       {
+	 free(path);
+	 f=f->next;
+       }
       
      }
      pthread_mutex_unlock(&load_hash[i]->h_lock);
