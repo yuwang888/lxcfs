@@ -4416,14 +4416,13 @@ void* load_begin(void* arg)
 
    char *path=NULL;
    
-   int i,j,k;
-   k=load_size/2;
+   int i,j;
    struct load_node *f,*g;
 while(1)
 {
 
 
-   for(i=0;i<k;i++)
+   for(i=0;i<load_size;i++)
    {
      pthread_mutex_lock(&load_hash[i]->h_lock);
      if(load_hash[i]->next ==NULL)
@@ -4470,65 +4469,7 @@ while(1)
    
  
 }
-void* load_begin1(void* arg)
-{
 
-
-   char *path=NULL;
-   
-   int i,j;
-   struct load_node *f,*g;
-while(1)
-{
-
-
-   for(i=load_size/2;i<load_size;i++)
-   {
-     pthread_mutex_lock(&load_hash[i]->h_lock);
-     if(load_hash[i]->next ==NULL)
-     {
-       pthread_mutex_unlock(&load_hash[i]->h_lock);
-       continue;
-     }
-     for(f=load_hash[i]->next;f;)
-     {  
-       //printf("%s\n",f->containerID );
-       path=(char*)malloc(strlen(f->containerID)+2);
-       sprintf(path,"%s%s",*(f->containerID) == '/' ? "." : "",f->containerID);
-       j=calc_load(&f,path);
-       //printf("----------i:%d------------j:%d------------------------------\n",i,j );
-       if(j==0)
-       {
-      	 free(path);
-      	 if(f->next==NULL)
-      	 {
-      	 	*(f->pre)=NULL;
-      	 }else{
-      	 	*(f->pre)=f->next;
-      	     f->next->pre=f->pre;
-      	 }
-      	 g=f->next;
-      	 printf("pthread node %s cancel\n",f->containerID);
-      	 free(f->containerID);
-      	 free(f);
-      	 f=g;       
-       }
-       else
-       {
-	 free(path);
-	 f=f->next;
-       }
-      
-     }
-     pthread_mutex_unlock(&load_hash[i]->h_lock);
-   }
-
-     // load_show();
-      sleep(flush_time);
-}
-   
- 
-}
  
 static int proc_loadavg_read(char *buf, size_t size, off_t offset,
 		struct fuse_file_info *fi)
