@@ -4434,11 +4434,10 @@ void* load_begin(void* arg)
    struct load_node *f,*g;
    while(1)
    {
-
-
+   clock_t time1 = clock();
    for(i=0;i<load_size;i++)
    {
-     clock_t time1 = clock();
+     
      pthread_mutex_lock(&load_hash[i]->h_lock);
      if(load_hash[i]->next ==NULL)
      {
