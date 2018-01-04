@@ -173,7 +173,7 @@ static struct load_node* locate_node(char *containerID,int locate) //not return 
     if(load_hash[locate]->next==NULL)
      {
      	pthread_rwlock_unlock(&load_hash[locate]->rilock);
-     	pthread_rwlock_unlock(&load_hash[locate]->rdlock);
+     	//pthread_rwlock_unlock(&load_hash[locate]->rdlock);
      	return f;
      }
     f=load_hash[locate]->next;
@@ -192,6 +192,7 @@ static void load_show()
   struct load_node *f;
   for(i=0;i<load_size;i++)
   {
+    
     pthread_rwlock_rdlock(&load_hash[i]->rilock);
     pthread_rwlock_rdlock(&load_hash[i]->rdlock);
     if(load_hash[i]->next ==NULL)
@@ -211,16 +212,19 @@ static void load_show()
     pthread_rwlock_unlock(&load_hash[i]->rdlock);
   }
 }
-static void load_free()
+void load_free(void)
 {
   int i;
   struct load_node *f,*p;
   for(i=0;i<load_size;i++)
   {
+    pthread_mutex_lock(&load_hash[i]->h_lock);
     pthread_rwlock_wrlock(&load_hash[i]->rilock);
     pthread_rwlock_wrlock(&load_hash[i]->rdlock);
     if(load_hash[i]->next ==NULL)
       {
+      	pthread_mutex_unlock(&load_hash[i]->h_lock);
+      	pthread_mutex_destroy(&load_hash[i]->h_lock);
       	pthread_rwlock_unlock(&load_hash[i]->rilock);
       	pthread_rwlock_destroy(&load_hash[i]->rilock);
       	pthread_rwlock_unlock(&load_hash[i]->rdlock);
@@ -236,6 +240,8 @@ static void load_free()
       free(f);
       f=p;
     }
+    pthread_mutex_unlock(&load_hash[i]->h_lock);
+    pthread_mutex_destroy(&load_hash[i]->h_lock);
     pthread_rwlock_unlock(&load_hash[i]->rilock); 
     pthread_rwlock_destroy(&load_hash[i]->rilock);
     pthread_rwlock_unlock(&load_hash[i]->rdlock);
@@ -4303,8 +4309,6 @@ static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum,int cfd){
 					strcpy(path1, path);
 					strcat(path1, "/");
 					strcat(path1, file->d_name);
-
-	
 					int pd = depth - 1;
 					sum = calc_pid(pid_buf, path1, pd,sum,cfd);
 					free(path1);
@@ -4332,7 +4336,6 @@ static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum,int cfd){
 	}
 
 	while(getline(&line, &linelen, f) != -1){
-		//printf("num==%d\n",sum);
 		*pid_buf = (char **)realloc(*pid_buf, sizeof(char *) * (sum+1));
 		*(*pid_buf + sum) = (char *)malloc(sizeof(char) * (strlen(line) + 3));
 		strcpy(*(*pid_buf + sum), line);
@@ -4341,7 +4344,6 @@ static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum,int cfd){
 
 	fclose(f);
 	free(path);
-
 	return sum;
 }
 
@@ -4357,11 +4359,10 @@ static int calc_load(struct load_node **p,char *path)
   char *line = NULL;
   size_t linelen = 0;
   idbuf = (char **)malloc(sizeof(char*));
-  
-  clock_t time1 = clock();
+  //clock_t time1 = clock();
   int num = calc_pid(&idbuf, path, depth_dir,0,(*p)->cfd);
-  clock_t time2 = clock();
-  printf("-----cgroup time-------ms:%lf-----------------\n", (double)((time2-time1) / 1000));
+  //clock_t time2 = clock();
+  //printf("-----cgroup time-------us:%f-----------------\n", (double)((time2-time1) *1000000/ CLOCKS_PER_SEC));
   
   DIR *dp; 
   struct dirent *file;
@@ -4389,7 +4390,6 @@ static int calc_load(struct load_node **p,char *path)
              
               if((f=fopen(proc_path,"r"))!=NULL)
               {
-                //printf("get in\n");
                 if(getline(&line, &linelen, f)!=-1) 
                   if(getline(&line, &linelen, f)!=-1)
                    if(getline(&line, &linelen, f)!=-1)
@@ -4404,17 +4404,17 @@ static int calc_load(struct load_node **p,char *path)
       closedir(dp);
     
   }
-  clock_t time3 = clock();
-  printf("--------------proc time----------ms:%lf\n", (double)((time3-time2) / 1000));
+  //clock_t time3 = clock();
+  //printf("--------------proc time----------us:%f\n", (double)((time3-time2) *1000000/ CLOCKS_PER_SEC));
+  //printf("--------------total time----------us:%f\n", (double)((time3-time1) *1000000/ CLOCKS_PER_SEC));
 
-   (*p)->load[0] = (*p)->load[0]*exp1+run_pid*(1-exp1); 
-   (*p)->load[1] = (*p)->load[1]*exp2+run_pid*(1-exp2); 
-   (*p)->load[2] = (*p)->load[2]*exp3+run_pid*(1-exp3);    
+  (*p)->load[0] = (*p)->load[0]*exp1+run_pid*(1-exp1); 
+  (*p)->load[1] = (*p)->load[1]*exp2+run_pid*(1-exp2); 
+  (*p)->load[2] = (*p)->load[2]*exp3+run_pid*(1-exp3);    
 
   (*p)->load[3]=run_pid;
   (*p)->load[4]=total_pid;
   (*p)->load[5]=last_pid;  
-  
   
   for(;i>0;i--)
     free(idbuf[i-1]);
@@ -4432,12 +4432,13 @@ void* load_begin(void* arg)
    char *path=NULL; 
    int i,num;
    struct load_node *f,*g;
-while(1)
-{
+   while(1)
+   {
 
 
    for(i=0;i<load_size;i++)
    {
+     clock_t time1 = clock();
      pthread_mutex_lock(&load_hash[i]->h_lock);
      if(load_hash[i]->next ==NULL)
      {
@@ -4451,7 +4452,7 @@ while(1)
        path=(char*)malloc(strlen(f->containerID)+2);
        sprintf(path,"%s%s",*(f->containerID) == '/' ? "." : "",f->containerID);
        num=calc_load(&f,path);
-       printf("----------i:%d------------num:%d------------------------------\n",i,num );
+       //printf("----------i:%d------------num:%d------------------------------\n",i,num );
        if(num==0)
        {
       	 pthread_rwlock_wrlock(&load_hash[i]->rdlock);
@@ -4477,11 +4478,13 @@ while(1)
         }
      }
      
-   }
+    }
 
-     // load_show();
-      sleep(flush_time);
-}
+     clock_t time3 = clock();
+     printf("--------------total time----------ms:%f\n", (double)((time3-time1) *1000/ CLOCKS_PER_SEC));
+
+     sleep(flush_time);
+    }
    
  
 }
@@ -4521,9 +4524,7 @@ static int proc_loadavg_read(char *buf, size_t size, off_t offset,
 
 	prune_init_slice(cg);
 	hash=calc_hash(cg);
-	 printf("locate before-----------------------------\n");
 	n=locate_node(cg,hash);
-		 printf("locate after-----------------------------\n");
 
 
 	if(n==NULL)//first time
@@ -4545,42 +4546,38 @@ static int proc_loadavg_read(char *buf, size_t size, off_t offset,
         n->load[4]=1;
         n->load[5]=initpid;
         n->cfd=cfd;       
-        printf("insert before-----------------------------\n");
         insert_node(&n,hash);
-        printf("insert after-----------------------------\n");
 	}
+
 	total_len = snprintf(d->buf, d->buflen, "%.2f %.2f %.2f %d/%d %d\n",n->load[0],n->load[1],n->load[2],(int)(n->load[3]),(int)(n->load[4]),(int)(n->load[5]));	
 	pthread_rwlock_unlock(&load_hash[hash]->rdlock);
 	if (total_len < 0 || total_len >=  d->buflen){
 		lxcfs_error("%s\n", "failed to write to cache");
 		return 0;
 	}
-
 	d->size = (int)total_len;
 	d->cached = 1;
 
 	if (total_len > size) total_len = size;
-
 	memcpy(buf, d->buf, total_len);
-
 	return total_len;
 	
 	
 }
 
-int load_daemon(void)
+pthread_t load_daemon(void)
 {   
     init_load();
     int ret;  
    	pthread_t pid;
    		
-   /* ret = pthread_create(&pid,NULL,load_begin,NULL);  
+    ret = pthread_create(&pid,NULL,load_begin,NULL);  
     if(ret != 0)  
     {     
        	printf("Create pthread error!\n");  
        	exit(1);  
-    } */
-    return 0;
+    } 
+    return pid;
   
 }
 ////////////////////////////////////////
