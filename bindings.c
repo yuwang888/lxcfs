@@ -4305,13 +4305,13 @@ static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum,int cfd){
 			else{
 				if(file->d_type==DT_DIR){
 
-					char *path1 = (char*)malloc(sizeof(char)*(strlen(path)+2+sizeof(file->d_name)));
-					strcpy(path1, path);
-					strcat(path1, "/");
-					strcat(path1, file->d_name);
+					char *path_dir = (char*)malloc(sizeof(char)*(strlen(path)+2+sizeof(file->d_name)));
+					strcpy(path_dir, path);
+					strcat(path_dir, "/");
+					strcat(path_dir, file->d_name);
 					int pd = depth - 1;
-					sum = calc_pid(pid_buf, path1, pd,sum,cfd);
-					free(path1);
+					sum = calc_pid(pid_buf, path_dir, pd,sum,cfd);
+					free(path_dir);
 					
 				}
 			
@@ -4322,6 +4322,11 @@ static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum,int cfd){
 	}
 
 	close(fd);
+	if(sum==-1)
+	{
+		free(path);
+		return -1;
+	}
 	strcat(path, "/cgroup.procs");
 	FILE *f  =NULL;
 	size_t linelen = 0;
@@ -4336,7 +4341,17 @@ static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum,int cfd){
 	}
 
 	while(getline(&line, &linelen, f) != -1){
-		*pid_buf = (char **)realloc(*pid_buf, sizeof(char *) * (sum+1));
+		char ** pid;
+		pid=(char **)realloc(*pid_buf, sizeof(char *) * (sum+1));
+		if(pid==NULL)
+		{
+			lxcfs_error("%s\n", "realloc error!");
+			for(;sum>0;sum--)
+    		  free((*pid_buf)[sum-1]);
+			return -1;
+		}
+		*pid_buf = pid;
+		//*pid_buf = (char **)realloc(*pid_buf, sizeof(char *) * (sum+1));
 		*(*pid_buf + sum) = (char *)malloc(sizeof(char) * (strlen(line) + 3));
 		strcpy(*(*pid_buf + sum), line);
 		sum++;
@@ -4359,15 +4374,22 @@ static int calc_load(struct load_node **p,char *path)
   char *line = NULL;
   size_t linelen = 0;
   idbuf = (char **)malloc(sizeof(char*));
-  //clock_t time1 = clock();
   int num = calc_pid(&idbuf, path, depth_dir,0,(*p)->cfd);
-  //clock_t time2 = clock();
-  //printf("-----cgroup time-------us:%f-----------------\n", (double)((time2-time1) *1000000/ CLOCKS_PER_SEC));
   
   DIR *dp; 
   struct dirent *file;
 
-  if(num==0) return num;
+  if(num==0) //normal exit
+  {
+  	free(idbuf);
+  	return num;
+  }	
+  if(num==-1) //abnormal exit
+  {
+  	free(idbuf);
+  	return 0;
+  }	
+
 
   for(i=0;i<num;i++)
   {
@@ -4404,9 +4426,6 @@ static int calc_load(struct load_node **p,char *path)
       closedir(dp);
     
   }
-  //clock_t time3 = clock();
-  //printf("--------------proc time----------us:%f\n", (double)((time3-time2) *1000000/ CLOCKS_PER_SEC));
-  //printf("--------------total time----------us:%f\n", (double)((time3-time1) *1000000/ CLOCKS_PER_SEC));
 
   (*p)->load[0] = (*p)->load[0]*exp1+run_pid*(1-exp1); 
   (*p)->load[1] = (*p)->load[1]*exp2+run_pid*(1-exp2); 
@@ -4418,8 +4437,8 @@ static int calc_load(struct load_node **p,char *path)
   
   for(;i>0;i--)
     free(idbuf[i-1]);
-    free(idbuf);
-    free(line);
+  free(idbuf);
+  free(line);
   return num;
 
 }
@@ -4544,7 +4563,7 @@ static int proc_loadavg_read(char *buf, size_t size, off_t offset,
         n->load[3]=0;
         n->load[4]=1;
         n->load[5]=initpid;
-        n->cfd=cfd;       
+        n->cfd=cfd;   
         insert_node(&n,hash);
 	}
 
@@ -4569,7 +4588,6 @@ pthread_t load_daemon(void)
     init_load();
     int ret;  
    	pthread_t pid;
-   		
     ret = pthread_create(&pid,NULL,load_begin,NULL);  
     if(ret != 0)  
     {     
