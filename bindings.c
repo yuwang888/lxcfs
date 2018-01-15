@@ -186,7 +186,7 @@ static struct load_node* locate_node(char *containerID,int locate) //not return 
     return f;
         
 }
-static void load_show()
+/*static void load_show()
 {
   int i,j;
   struct load_node *f;
@@ -212,6 +212,7 @@ static void load_show()
     pthread_rwlock_unlock(&load_hash[i]->rdlock);
   }
 }
+*/
 void load_free(void)
 {
   int i;
@@ -4282,8 +4283,8 @@ err:
 }
 ////////////////////////////////////////
 
-static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum,int cfd){
-
+static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum,int cfd)
+{
 	DIR *dir;
 	int fd;
 	struct dirent *file;
@@ -4363,10 +4364,7 @@ static int calc_pid(char *** pid_buf, char *dpath, int depth,int sum,int cfd){
 }
 
 static int calc_load(struct load_node **p,char *path)
-{
-  
-  
-  
+{  
   FILE *f = NULL;
   char **idbuf;
   char proc_path[50];
@@ -4389,8 +4387,6 @@ static int calc_load(struct load_node **p,char *path)
   	free(idbuf);
   	return 0;
   }	
-
-
   for(i=0;i<num;i++)
   {
     
@@ -4443,11 +4439,8 @@ static int calc_load(struct load_node **p,char *path)
 
 }
 
-
 void* load_begin(void* arg)
 {
-
-
    char *path=NULL; 
    int i,num;
    struct load_node *f,*g;
@@ -4455,8 +4448,7 @@ void* load_begin(void* arg)
    {
    clock_t time1 = clock();
    for(i=0;i<load_size;i++)
-   {
-     
+   {    
      pthread_mutex_lock(&load_hash[i]->h_lock);
      if(load_hash[i]->next ==NULL)
      {
@@ -4470,7 +4462,6 @@ void* load_begin(void* arg)
        path=(char*)malloc(strlen(f->containerID)+2);
        sprintf(path,"%s%s",*(f->containerID) == '/' ? "." : "",f->containerID);
        num=calc_load(&f,path);
-       //printf("----------i:%d------------num:%d------------------------------\n",i,num );
        if(num==0)
        {
       	 pthread_rwlock_wrlock(&load_hash[i]->rdlock);
@@ -4497,14 +4488,11 @@ void* load_begin(void* arg)
      }
      
     }
-
-     clock_t time3 = clock();
-     printf("--------------total time----------ms:%f\n", (double)((time3-time1) *1000/ CLOCKS_PER_SEC));
+     clock_t time2 = clock();
+     printf("--------------total time----------ms:%f\n", (double)((time2-time1) *1000/ CLOCKS_PER_SEC));
 
      sleep(flush_time);
     }
-   
- 
 }
 
  
