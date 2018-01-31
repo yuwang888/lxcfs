@@ -4408,13 +4408,15 @@ static int calc_load(struct load_node **p,char *path)
              
               if((f=fopen(proc_path,"r"))!=NULL)
               {
-                if(getline(&line, &linelen, f)!=-1) 
-                  if(getline(&line, &linelen, f)!=-1)
-                   if(getline(&line, &linelen, f)!=-1)
-                   {
-                      if((line[7]=='R')||(line[7]=='D'))
-                    run_pid++;
-                    }
+                while(getline(&line, &linelen, f)!=-1) 
+                {
+                	if((line[0]=='S')&&(line[1]=='t'))//State
+                		break;
+                }
+                   
+                if((line[7]=='R')||(line[7]=='D'))
+                  run_pid++;
+                    
                 fclose(f);
               }
       
@@ -4489,9 +4491,8 @@ void* load_begin(void* arg)
      
     }
      clock_t time2 = clock();
-     printf("--------------total time----------ms:%f\n", (double)((time2-time1) *1000/ CLOCKS_PER_SEC));
-
-     sleep(flush_time);
+     //printf("--------------total time----------ms:%f\n", (double)((time2-time1) *1000/ CLOCKS_PER_SEC));
+     usleep(flush_time*1000000-(int)((time2-time1) *1000/ CLOCKS_PER_SEC));
     }
 }
 
