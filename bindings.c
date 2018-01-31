@@ -4492,7 +4492,7 @@ void* load_begin(void* arg)
     }
      clock_t time2 = clock();
      //printf("--------------total time----------ms:%f\n", (double)((time2-time1) *1000/ CLOCKS_PER_SEC));
-     usleep(flush_time*1000000-(int)((time2-time1) *1000/ CLOCKS_PER_SEC));
+     usleep(flush_time*1000000-(int)((time2-time1) *1000000/ CLOCKS_PER_SEC));
     }
 }
 
