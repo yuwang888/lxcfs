@@ -131,6 +131,43 @@ void init_load()
         }
     }
 }
+void load_free(void)
+{
+  int i;
+  struct load_node *f,*p;
+  for(i=0;i<load_size;i++)
+  {
+    pthread_mutex_lock(&load_hash[i]->h_lock);
+    pthread_rwlock_wrlock(&load_hash[i]->rilock);
+    pthread_rwlock_wrlock(&load_hash[i]->rdlock);
+    if(load_hash[i]->next ==NULL)
+      {
+      	pthread_mutex_unlock(&load_hash[i]->h_lock);
+      	pthread_mutex_destroy(&load_hash[i]->h_lock);
+      	pthread_rwlock_unlock(&load_hash[i]->rilock);
+      	pthread_rwlock_destroy(&load_hash[i]->rilock);
+      	pthread_rwlock_unlock(&load_hash[i]->rdlock);
+      	pthread_rwlock_destroy(&load_hash[i]->rdlock);
+      	free(load_hash[i]); 
+      	continue;
+      }
+    for(f=load_hash[i]->next;f;)
+    {  
+      free(f->containerID);
+      p=f->next;
+
+      free(f);
+      f=p;
+    }
+    pthread_mutex_unlock(&load_hash[i]->h_lock);
+    pthread_mutex_destroy(&load_hash[i]->h_lock);
+    pthread_rwlock_unlock(&load_hash[i]->rilock); 
+    pthread_rwlock_destroy(&load_hash[i]->rilock);
+    pthread_rwlock_unlock(&load_hash[i]->rdlock);
+    pthread_rwlock_destroy(&load_hash[i]->rdlock);
+    free(load_hash[i]);
+  }
+}
 /* Reserve buffer size to account for file size changes. */
 #define BUF_RESERVE_SIZE 512
 
