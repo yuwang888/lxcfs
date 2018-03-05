@@ -131,6 +131,41 @@ void init_load()
         }
     }
 }
+static void insert_node(struct load_node **n,int locate)
+{
+    pthread_mutex_lock(&load_hash[locate]->h_lock);
+    pthread_rwlock_wrlock(&load_hash[locate]->rilock);
+    struct load_node *f=load_hash[locate]->next;
+    load_hash[locate]->next=*n;
+    (*n)->pre=&(load_hash[locate]->next);
+
+    if(f)
+        f->pre=&((*n)->next);
+    (*n)->next=f;
+    pthread_mutex_unlock(&load_hash[locate]->h_lock);
+    pthread_rwlock_unlock(&load_hash[locate]->rilock);
+}
+
+static struct load_node* locate_node(char *containerID,int locate) //not return NULL means find;
+{
+    struct load_node *f=NULL;
+    int i=0;
+    pthread_rwlock_rdlock(&load_hash[locate]->rilock);
+    pthread_rwlock_rdlock(&load_hash[locate]->rdlock);
+    if(load_hash[locate]->next==NULL)
+     {
+     	pthread_rwlock_unlock(&load_hash[locate]->rilock);
+     	return f;
+     }
+    f=load_hash[locate]->next;
+    pthread_rwlock_unlock(&load_hash[locate]->rilock);
+   
+    while(f&&((i=strcmp(f->containerID,containerID))!=0))
+            f=f->next;
+      
+    return f;
+        
+}
 void load_free(void)
 {
   int i;
@@ -4428,6 +4463,79 @@ void* load_begin(void* arg)
       clock_t time2=clock();
      usleep(flush_time*1000000-(int)((time2-time1) *1000000/ CLOCKS_PER_SEC));
    }
+}
+static int proc_loadavg_read(char *buf, size_t size, off_t offset,
+		struct fuse_file_info *fi)
+{
+	struct fuse_context *fc = fuse_get_context();
+	struct file_info *d = (struct file_info *)fi->fh;
+	char *cg;
+	size_t total_len = 0;
+	
+	char *cache = d->buf;
+
+    struct load_node *n;
+    int hash;
+    int cfd;
+
+	if (offset){
+		if (offset > d->size)
+			return -EINVAL;
+		if (!d->cached)
+			return 0;
+		int left = d->size - offset;
+		total_len = left > size ? size: left;
+		memcpy(buf, cache + offset, total_len);
+		return total_len;
+	}
+
+	pid_t initpid = lookup_initpid_in_store(fc->pid);
+	if (initpid <= 0)
+		initpid = fc->pid;
+	cg = get_pid_cgroup(initpid, "cpu");
+	if (!cg)
+		return read_file("/proc/loadavg", buf, size, d);
+
+	prune_init_slice(cg);
+	hash=calc_hash(cg);
+	n=locate_node(cg,hash);
+
+
+	if(n==NULL)//first time
+	{	
+		if (!find_mounted_controller("cpu", &cfd))
+		{
+			pthread_rwlock_unlock(&load_hash[hash]->rdlock);
+			return 0;
+		}	
+
+		n=(struct load_node*)malloc(sizeof(struct load_node));
+		n->containerID=(char*)malloc(strlen(cg)+1);
+        strcpy(n->containerID,cg);
+
+        n->load[0]=0;
+        n->load[1]=0;
+        n->load[2]=0;
+        n->load[3]=0;
+        n->load[4]=1;
+        n->load[5]=initpid;
+        n->cfd=cfd;   
+        insert_node(&n,hash);
+	}
+
+	total_len = snprintf(d->buf, d->buflen, "%.2f %.2f %.2f %d/%d %d\n",n->load[0],n->load[1],n->load[2],(int)(n->load[3]),(int)(n->load[4]),(int)(n->load[5]));	
+	pthread_rwlock_unlock(&load_hash[hash]->rdlock);
+	if (total_len < 0 || total_len >=  d->buflen){
+		lxcfs_error("%s\n", "failed to write to cache");
+		return 0;
+	}
+	d->size = (int)total_len;
+	d->cached = 1;
+
+	if (total_len > size) total_len = size;
+	memcpy(buf, d->buf, total_len);
+	return total_len;
+		
 }
 pthread_t load_daemon(void)
 {   
