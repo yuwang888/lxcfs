@@ -910,7 +910,15 @@ int main(int argc, char *argv[])
 	
 	if (!fuse_main(nargs, newargv, &lxcfs_ops, NULL))
 		ret = EXIT_SUCCESS;
-	
+	if(pthread_cancel(pid)==0)
+	{
+		sleep(5);
+		void (*load_free)(void);
+		load_free= (void (*)(void)) dlsym(dlopen_handle, "load_free");
+		load_free();
+		printf("\nload_free success!\n");
+	}else
+	printf("\nload_free error!\n");
 
 out:
 	if (dlopen_handle)
