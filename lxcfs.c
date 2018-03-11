@@ -848,6 +848,8 @@ int main(int argc, char *argv[])
 	char *pidfile = NULL, *v = NULL;
 	size_t pidfile_len;
 	bool debug = false;
+	pthread_t pid;
+	char *error;
 	/*
 	 * what we pass to fuse_main is:
 	 * argv[0] -s [-f|-d] -o allow_other,directio argv[1] NULL
@@ -901,10 +903,32 @@ int main(int argc, char *argv[])
 	}
 	if ((pidfd = set_pidfile(pidfile)) < 0)
 		goto out;
+	dlerror();    /* Clear any existing error */
+	pthread_t (*load_daemon)(void);
 
+	load_daemon = (pthread_t (*)(void)) dlsym(dlopen_handle, "load_daemon");
+	error = dlerror();
+	if (error != NULL) {
+		lxcfs_error("%s\n", error);
+		return -1;
+	}
+	pid = load_daemon();
 	if (!fuse_main(nargs, newargv, &lxcfs_ops, NULL))
 		ret = EXIT_SUCCESS;
+	if (pthread_cancel(pid) == 0) {
+		sleep(5);
+		dlerror();    /* Clear any existing error */
+		void (*load_free)(void);
 
+		load_free = (void (*)(void)) dlsym(dlopen_handle, "load_free");
+		error = dlerror();
+		if (error != NULL) {
+			lxcfs_error("%s\n", error);
+			return -1;
+		}
+		load_free();
+	} else
+		lxcfs_error("%s\n", "load_free error!");
 out:
 	if (dlopen_handle)
 		dlclose(dlopen_handle);
