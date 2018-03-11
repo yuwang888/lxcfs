@@ -915,7 +915,20 @@ int main(int argc, char *argv[])
 	pid = load_daemon();
 	if (!fuse_main(nargs, newargv, &lxcfs_ops, NULL))
 		ret = EXIT_SUCCESS;
+	if (pthread_cancel(pid) == 0) {
+		sleep(5);
+		dlerror();    /* Clear any existing error */
+		void (*load_free)(void);
 
+		load_free = (void (*)(void)) dlsym(dlopen_handle, "load_free");
+		error = dlerror();
+		if (error != NULL) {
+			lxcfs_error("%s\n", error);
+			return -1;
+		}
+		load_free();
+	} else
+		lxcfs_error("%s\n", "load_free error!");
 out:
 	if (dlopen_handle)
 		dlclose(dlopen_handle);
