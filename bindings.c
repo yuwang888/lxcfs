@@ -92,6 +92,23 @@ struct file_info {
 #define EXP_15		2037		/* 1/exp(5sec/15min) */
 #define LOAD_INT(x) ((x) >> FSHIFT)
 #define LOAD_FRAC(x) LOAD_INT(((x) & (FIXED_1-1)) * 100)
+
+static int calc_hash(char *name)
+{
+	unsigned int hash = 0;
+	unsigned int x = 0;
+
+	while (*name) {
+		hash = (hash << 4) + *name++;
+		x = hash & 0xf0000000;
+		if (x != 0) {
+			hash ^= (x >> 24);
+			hash &= ~x;
+		}
+	}
+	return ((hash & 0x7fffffff) % LOAD_SIZE);
+}
+
 struct load_node {
 	char *cg;  /*cg */
 	unsigned long avenrun[3];		/* Load averages */
@@ -134,6 +151,39 @@ out:
 	free(load_hash[i]);
 	lxcfs_error("%s\n", "lock init error");
 	exit(1);
+}
+
+static void insert_node(struct load_node **n, int locate)
+{
+	pthread_mutex_lock(&load_hash[locate]->lock);
+	pthread_rwlock_wrlock(&load_hash[locate]->rilock);
+	struct load_node *f = load_hash[locate]->next;
+	load_hash[locate]->next = *n;
+
+	(*n)->pre = &(load_hash[locate]->next);
+	if (f)
+		f->pre = &((*n)->next);
+	(*n)->next = f;
+	pthread_mutex_unlock(&load_hash[locate]->lock);
+	pthread_rwlock_unlock(&load_hash[locate]->rilock);
+}
+/* Find spectial node. It means find if it doesn't return NULL. */
+static struct load_node *locate_node(char *cg, int locate)
+{
+	struct load_node *f = NULL;
+	int i = 0;
+
+	pthread_rwlock_rdlock(&load_hash[locate]->rilock);
+	pthread_rwlock_rdlock(&load_hash[locate]->rdlock);
+	if (load_hash[locate]->next == NULL) {
+		pthread_rwlock_unlock(&load_hash[locate]->rilock);
+		return f;
+	}
+	f = load_hash[locate]->next;
+	pthread_rwlock_unlock(&load_hash[locate]->rilock);
+	while (f && ((i = strcmp(f->cg, cg)) != 0))
+		f = f->next;
+	return f;
 }
 
 static struct load_node *del_node(struct load_node *n, int locate)
@@ -4412,6 +4462,84 @@ void *load_begin(void *arg)
 		clock_t time2 = clock();
 		usleep(FLUSH_TIME * 1000000 - (int)((time2 - time1) * 1000000 / CLOCKS_PER_SEC));
 	}
+}
+
+static int proc_loadavg_read(char *buf, size_t size, off_t offset,
+		struct fuse_file_info *fi)
+{
+	struct fuse_context *fc = fuse_get_context();
+	struct file_info *d = (struct file_info *)fi->fh;
+	char *cg;
+	size_t total_len = 0;
+
+	char *cache = d->buf;
+
+	struct load_node *n;
+	int hash;
+	int cfd;
+	unsigned long a, b, c;
+
+	if (offset) {
+		if (offset > d->size)
+			return -EINVAL;
+		if (!d->cached)
+			return 0;
+		int left = d->size - offset;
+		total_len = left > size ? size : left;
+		memcpy(buf, cache + offset, total_len);
+		return total_len;
+	}
+
+	pid_t initpid = lookup_initpid_in_store(fc->pid);
+	if (initpid <= 0)
+		initpid = fc->pid;
+	cg = get_pid_cgroup(initpid, "cpu");
+	if (!cg)
+		return read_file("/proc/loadavg", buf, size, d);
+
+	prune_init_slice(cg);
+	hash = calc_hash(cg);
+	n = locate_node(cg, hash);
+
+	/* first time */
+	if (n == NULL) {
+		if (!find_mounted_controller("cpu", &cfd)) {
+			pthread_rwlock_unlock(&load_hash[hash]->rdlock);
+			return 0;
+		}
+
+		n = (struct load_node *)malloc(sizeof(struct load_node));
+		n->cg = (char *)malloc(strlen(cg)+1);
+		strcpy(n->cg, cg);
+		n->avenrun[0] = 0;
+		n->avenrun[1] = 0;
+		n->avenrun[2] = 0;
+		n->run_pid = 0;
+		n->total_pid = 1;
+		n->last_pid = initpid;
+		n->cfd = cfd;
+		insert_node(&n, hash);
+	}
+	a = n->avenrun[0] + (FIXED_1/200);
+	b = n->avenrun[1] + (FIXED_1/200);
+	c = n->avenrun[2] + (FIXED_1/200);
+	total_len = snprintf(d->buf, d->buflen, "%lu.%02lu %lu.%02lu %lu.%02lu %d/%d %d\n",
+		LOAD_INT(a), LOAD_FRAC(a),
+		LOAD_INT(b), LOAD_FRAC(b),
+		LOAD_INT(c), LOAD_FRAC(c),
+		n->run_pid, n->total_pid, n->last_pid);
+	pthread_rwlock_unlock(&load_hash[hash]->rdlock);
+	if (total_len < 0 || total_len >=  d->buflen) {
+		lxcfs_error("%s\n", "failed to write to cache");
+		return 0;
+	}
+	d->size = (int)total_len;
+	d->cached = 1;
+
+	if (total_len > size)
+		total_len = size;
+	memcpy(buf, d->buf, total_len);
+	return total_len;
 }
 
 pthread_t load_daemon(void)
